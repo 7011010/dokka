@@ -3,7 +3,6 @@
  */
 package org.jetbrains.dokka.gradle.adapters
 
-import com.android.build.api.variant.AndroidComponentsExtension
 import org.gradle.api.Named
 import org.gradle.api.NamedDomainObjectContainer
 import org.gradle.api.Plugin
@@ -31,12 +30,9 @@ import org.jetbrains.kotlin.commonizer.stdlib
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.dsl.KotlinProjectExtension
 import org.jetbrains.kotlin.gradle.dsl.KotlinSingleTargetExtension
-import org.jetbrains.kotlin.gradle.plugin.KotlinCompilation
+import org.jetbrains.kotlin.gradle.plugin.*
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilation.Companion.MAIN_COMPILATION_NAME
-import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType.androidJvm
-import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
-import org.jetbrains.kotlin.gradle.plugin.getKotlinPluginVersion
 import org.jetbrains.kotlin.gradle.plugin.mpp.AbstractKotlinNativeCompilation
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinJvmAndroidCompilation
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinMetadataCompilation
@@ -61,17 +57,32 @@ abstract class KotlinAdapter @Inject constructor(
     override fun apply(project: Project) {
         logger.info("Applying $dkaName to ${project.path}")
 
-        project.plugins.withType<DokkaBasePlugin>().configureEach {
+        project.plugins.withType<DokkaBasePlugin>().all {
             project.pluginManager.apply {
                 withPlugin(PluginId.KotlinAndroid) { exec(project) }
                 withPlugin(PluginId.KotlinJs) { exec(project) }
                 withPlugin(PluginId.KotlinJvm) { exec(project) }
                 withPlugin(PluginId.KotlinMultiplatform) { exec(project) }
+//                withPlugin(PluginId.AndroidBuiltInKotlin) { exec(project) }
+            }
+
+            try {
+                project.plugins.withType<org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin>().all {
+                    exec(project)
+                }
+            } catch (_: NoClassDefFoundError) {
+                //logger.warn("Dokka Kotlin Plugin requires Kotlin Gradle Plugin 1.9.20 or higher")
             }
         }
     }
 
     private fun exec(project: Project) {
+        if (project.extraProperties.has("dokka kotlin adapter run")) {
+            return
+        } else {
+            project.extraProperties.set("dokka kotlin adapter run", true)
+        }
+
         val kotlinExtension = project.findKotlinExtension()
         if (kotlinExtension == null) {
             logger.info("Skipping applying $dkaName in ${project.path} - could not find KotlinProjectExtension")
@@ -213,7 +224,6 @@ abstract class KotlinAdapter @Inject constructor(
  * The compilation details may come from a multiplatform project ([KotlinMultiplatformExtension])
  * or a single-platform project ([KotlinSingleTargetExtension]).
  */
-@InternalDokkaGradlePluginApi
 private data class KotlinCompilationDetails(
     /** [KotlinCompilation.target] name. */
     val target: String,
@@ -292,11 +302,12 @@ private class KotlinCompilationDetailsBuilder(
     ): Provider<Set<AndroidVariantInfo>> {
         val androidVariants = objects.setProperty(AndroidVariantInfo::class)
 
-        if (currentKotlinToolingVersion.supportsAgpKotlinBuiltInCompilation()) {
+        val androidComponents = project.findAndroidComponentExtension()
+        if (androidComponents != null) {
             project.pluginManager.apply {
-                withPlugin(PluginId.AndroidBase) { collectAndroidVariants(project, androidVariants) }
-                withPlugin(PluginId.AndroidApplication) { collectAndroidVariants(project, androidVariants) }
-                withPlugin(PluginId.AndroidLibrary) { collectAndroidVariants(project, androidVariants) }
+                withPlugin(PluginId.AndroidBase) { collectAndroidVariants(androidComponents, androidVariants) }
+                withPlugin(PluginId.AndroidApplication) { collectAndroidVariants(androidComponents, androidVariants) }
+                withPlugin(PluginId.AndroidLibrary) { collectAndroidVariants(androidComponents, androidVariants) }
             }
         }
 
@@ -642,49 +653,6 @@ private class KotlinSourceSetDetailsBuilder(
 private fun Project.findKotlinExtension(): KotlinProjectExtension? =
     findExtensionLenient<KotlinProjectExtension>("kotlin")
 
-
-/** Try and get [AndroidComponentsExtension], or `null` if it's not present. */
-private fun Project.findAndroidComponentExtension(): AndroidComponentsExtension<*, *, *>? =
-    findExtensionLenient<AndroidComponentsExtension<*, *, *>>("androidComponents")
-
-
-/**
- * Store details about a [com.android.build.api.variant.Variant].
- *
- * @param[name] [com.android.build.api.variant.Variant.name].
- * @param[hasPublishedComponent] `true` if any component of the variant is 'published',
- * i.e. it is an instance of [com.android.build.api.variant.Variant].
- */
-private data class AndroidVariantInfo(
-    val name: String,
-    val hasPublishedComponent: Boolean,
-)
-
-/**
- * Collect [AndroidVariantInfo]s for all variants in the project.
- *
- * Should only be called when AGP is applied (otherwise the `androidComponents` extension will be missing).
- */
-private fun collectAndroidVariants(
-    project: Project,
-    androidVariants: SetProperty<AndroidVariantInfo>,
-) {
-    val androidComponents = project.findAndroidComponentExtension()
-
-    androidComponents?.onVariants { variant ->
-        val hasPublishedComponent =
-            variant.components.any { component ->
-                component is com.android.build.api.variant.Variant
-            }
-
-        androidVariants.add(
-            AndroidVariantInfo(
-                name = variant.name,
-                hasPublishedComponent = hasPublishedComponent,
-            )
-        )
-    }
-}
 
 /**
  * KGP 2.2.10 will start delegating Kotlin compilation to AGP ("Built-in Kotlin").
